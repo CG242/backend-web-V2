@@ -16,7 +16,12 @@ from .views_evenements import (
 from .views_arduino import (
     CapteurArduinoViewSet, MesureArduinoViewSet, DonneesManquantesViewSet,
     LogCapteurArduinoViewSet, recevoir_donnees_arduino, recevoir_donnees_arduino_batch,
-    rapport_etat_capteurs, detecter_et_completer_donnees_manquantes
+    rapport_etat_capteurs, detecter_et_completer_donnees_manquantes,
+    recevoir_info_capteur, recevoir_mesures_capteur
+)
+from .views_alertes import envoyer_alerte_externe, lister_alertes_actives, test_frontend_endpoint
+from .views_predictions import (
+    predict_erosion, get_active_model, get_model_performance, get_zone_predictions
 )
 
 # Configuration du router DRF - Routes principales uniquement
@@ -46,6 +51,13 @@ router.register(r'archives-donnees', ArchiveDonneesViewSet)
 app_name = 'erosion'
 
 urlpatterns = [
+    # URLs pour les alertes (vues Django classiques) - AVANT le router DRF
+    path('api/alertes/', envoyer_alerte_externe, name='envoyer_alerte_externe'),
+    path('api/alertes/actives/', lister_alertes_actives, name='lister_alertes_actives'),
+    
+    # Endpoint de test pour simuler le frontend
+    path('alertes/', test_frontend_endpoint, name='test_frontend_endpoint'),
+    
     # URLs de l'API REST
     path('api/', include(router.urls)),
     
@@ -58,6 +70,19 @@ urlpatterns = [
     path('api/arduino/recevoir-donnees-batch/', recevoir_donnees_arduino_batch, name='recevoir_donnees_arduino_batch'),
     path('api/arduino/rapport-etat/', rapport_etat_capteurs, name='rapport_etat_capteurs'),
     path('api/arduino/completer-donnees-manquantes/', detecter_et_completer_donnees_manquantes, name='completer_donnees_manquantes'),
+    
+    # URLs compatibles avec votre projet Arduino
+    path('api/sensors/info/', recevoir_info_capteur, name='recevoir_info_capteur'),
+    path('api/sensors/measurements/', recevoir_mesures_capteur, name='recevoir_mesures_capteur'),
+    
+    # URLs pour les prédictions ML
+    path('api/predict/', predict_erosion, name='predict_erosion'),
+    path('api/models/active/', get_active_model, name='get_active_model'),
+    path('api/models/<int:model_id>/performance/', get_model_performance, name='get_model_performance'),
+    path('api/zones/<int:zone_id>/predictions/', get_zone_predictions, name='get_zone_predictions'),
+    
+    # URLs pour l'analyse automatique
+    path('api/analyse-auto/', include('erosion.urls_analyse')),
 ]
 
 # ============================================================================

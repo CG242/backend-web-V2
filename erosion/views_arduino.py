@@ -30,7 +30,8 @@ from .serializers import (
     LogCapteurArduinoSerializer, DonneesArduinoReceptionSerializer,
     StatistiquesCapteurArduinoSerializer, RapportEtatCapteursSerializer
 )
-# Imports supprimés - services Arduino inutilisés supprimés
+from .services.analyse_fusion_service import AnalyseFusionService
+from .ml_services import MLPredictionService
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +346,8 @@ class LogCapteurArduinoViewSet(viewsets.ReadOnlyModelViewSet):
 def recevoir_donnees_arduino(request):
     """
     Endpoint pour recevoir les données des capteurs Arduino (version simplifiée)
+    NOTE: L'analyse et la prédiction déclenchées ci-dessous dérivent UNIQUEMENT
+    des DERNIÈRES mesures disponibles sur la zone du capteur et des événements récents.
     Accessible sans authentification pour faciliter l'intégration
     """
     try:
@@ -373,18 +376,31 @@ def recevoir_donnees_arduino(request):
                 qualite_donnee='bonne',
                 source_donnee='capteur_reel',
                 est_valide=True,
-                donnees_brutes=json.dumps(donnees_validees)
+                donnees_brutes=json.dumps(donnees_validees, default=str)
             )
             
             # Mettre à jour la dernière communication du capteur
             capteur.date_derniere_communication = timezone.now()
             capteur.save()
             
+            # Déclenchement synchrone: analyse + prédiction pour la zone du capteur
+            try:
+                if capteur.zone_id:
+                    fusion_service = AnalyseFusionService()
+                    fusion_service.analyser_zone(capteur.zone_id, periode_jours=1)
+                    try:
+                        ml_service = MLPredictionService()
+                        ml_service.predire_erosion(zone_id=capteur.zone_id, features={}, horizon_jours=30)
+                    except Exception as e:
+                        logger.warning(f"Prediction ML non exécutée (Arduino): {e}")
+            except Exception as e:
+                logger.warning(f"Analyse synchrone non exécutée (Arduino): {e}")
+            
             return Response({
                 'success': True,
                 'message': f'Données reçues et sauvegardées pour {capteur.nom}',
                 'mesure_id': mesure.id,
-                'timestamp_reception': timezone.now().isoformat()
+                'timestamp_reception': str(timezone.now())
             }, status=status.HTTP_201_CREATED)
             
         except CapteurArduino.DoesNotExist:
@@ -445,7 +461,7 @@ def recevoir_donnees_arduino_batch(request):
                     qualite_donnee='bonne',
                     source_donnee='capteur_reel',
                     est_valide=True,
-                    donnees_brutes=json.dumps(serializer.validated_data)
+                    donnees_brutes=json.dumps(serializer.validated_data, default=str)
                 )
                 
                 capteur.date_derniere_communication = timezone.now()
@@ -833,4 +849,253 @@ def notifications_recentes(request):
         logger.error(f"Erreur notifications récentes: {str(e)}")
         return Response({
             'erreur': f'Erreur lors de la récupération: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# =============================================================================
+# ENDPOINTS COMPATIBLES AVEC VOTRE PROJET ARDUINO
+# =============================================================================
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def recevoir_info_capteur(request):
+    """
+    Endpoint pour recevoir les informations du capteur (compatible avec votre Arduino)
+    POST /api/sensors/info/
+    """
+    try:
+        # Récupérer l'adresse IP source
+        adresse_ip_source = request.META.get('REMOTE_ADDR')
+        
+        # Données attendues de votre Arduino
+        sensor_id = request.data.get('sensor_id')
+        sensor_type = request.data.get('sensor_type')
+        mac_address = request.data.get('mac_address')
+        ip_address = request.data.get('ip_address')
+        ssid_wifi = request.data.get('ssid_wifi')
+        frequence_mesure_secondes = request.data.get('frequence_mesure_secondes', 120)
+        precision = request.data.get('precision', 0.1)
+        unite_mesure = request.data.get('unite_mesure', '°C/%')
+        battery_voltage = request.data.get('battery_voltage', 3.3)
+        wifi_signal = request.data.get('wifi_signal', -50)
+        
+        # Mapper les types Arduino vers les types acceptés par le backend
+        type_mapping = {
+            'dht11': 'temperature',
+            'dht22': 'temperature',
+            'rain': 'pluviometrie',
+            'water': 'niveau_mer',
+            'temperature': 'temperature',
+            'humidity': 'humidite',
+            'pressure': 'pression',
+        }
+        sensor_type_mapped = type_mapping.get(sensor_type.lower(), 'temperature')
+        
+        logger.info(f"Reception info capteur: {sensor_id} - MAC: {mac_address} - Type: {sensor_type} -> {sensor_type_mapped}")
+        
+        # Chercher ou créer le capteur
+        # Assigner automatiquement à une zone par défaut
+        zone_defaut = Zone.objects.first()
+        if not zone_defaut:
+            # Créer une zone par défaut si aucune n'existe
+            zone_defaut = Zone.objects.create(
+                nom="Zone par défaut",
+                superficie_km2=1.0,
+                niveau_risque='modere',
+                description="Zone par défaut pour les capteurs automatiques"
+            )
+        
+        capteur, created = CapteurArduino.objects.get_or_create(
+            adresse_mac=mac_address,
+            defaults={
+                'nom': f"{sensor_id}",
+                'type_capteur': sensor_type_mapped,
+                'zone': zone_defaut,
+                'adresse_ip': ip_address,
+                'ssid_wifi': ssid_wifi,
+                'frequence_mesure_secondes': frequence_mesure_secondes,
+                'precision': precision,
+                'unite_mesure': unite_mesure,
+                'etat': 'actif',
+                'actif': True
+            }
+        )
+        
+        if not created:
+            # Mettre à jour les informations
+            capteur.adresse_ip = ip_address
+            capteur.ssid_wifi = ssid_wifi
+            capteur.frequence_mesure_secondes = frequence_mesure_secondes
+            capteur.precision = precision
+            capteur.unite_mesure = unite_mesure
+            capteur.date_derniere_communication = timezone.now()
+            capteur.save()
+        
+        return Response({
+            'success': True,
+            'message': f'Informations capteur reçues pour {capteur.nom}',
+            'capteur_id': capteur.id,
+            'created': created,
+            'timestamp': str(timezone.now())
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la réception des infos capteur: {str(e)}")
+        return Response({
+            'success': False,
+            'message': f'Erreur serveur: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def recevoir_mesures_capteur(request):
+    """
+    Endpoint pour recevoir les mesures du capteur (compatible avec votre Arduino)
+    POST /api/sensors/measurements/
+    """
+    try:
+        # Récupérer l'adresse IP source
+        adresse_ip_source = request.META.get('REMOTE_ADDR')
+        
+        # Données attendues de votre Arduino
+        mac_address = request.data.get('mac_address')
+        temperature = request.data.get('temperature')
+        humidity = request.data.get('humidity')
+        rain_percent = request.data.get('rain_percent')  # NOUVEAU
+        water_percent = request.data.get('water_percent')  # NOUVEAU
+        timestamp = request.data.get('timestamp')
+        battery_voltage = request.data.get('battery_voltage', 3.3)
+        wifi_signal = request.data.get('wifi_signal', -50)
+        cpu_temperature = request.data.get('cpu_temperature', 45.0)
+        uptime_seconds = request.data.get('uptime_seconds', 0)
+        
+        logger.info(f"Reception mesures: MAC {mac_address} - Temp: {temperature}°C - Hum: {humidity}% - Pluie: {rain_percent}% - Eau: {water_percent}%")
+        
+        # Chercher le capteur
+        try:
+            capteur = CapteurArduino.objects.get(adresse_mac=mac_address)
+        except CapteurArduino.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': f'Capteur avec MAC {mac_address} introuvable'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Créer les mesures
+        mesures_crees = []
+        
+        # Mesure température
+        if temperature is not None:
+            mesure_temp = MesureArduino.objects.create(
+                capteur=capteur,
+                valeur=temperature,
+                unite='°C',
+                timestamp=timezone.now(),
+                qualite_donnee='bonne',
+                source_donnee='capteur_reel',
+                est_valide=True,
+                donnees_brutes=json.dumps({
+                    'temperature': temperature,
+                    'battery_voltage': battery_voltage,
+                    'wifi_signal': wifi_signal,
+                    'cpu_temperature': cpu_temperature,
+                    'uptime_seconds': uptime_seconds,
+                    'timestamp': timestamp
+                }, default=str)
+            )
+            mesures_crees.append(f"Température: {temperature}°C")
+        
+        # Mesure humidité
+        if humidity is not None:
+            mesure_hum = MesureArduino.objects.create(
+                capteur=capteur,
+                valeur=humidity,
+                humidite=humidity,
+                unite='%',
+                timestamp=timezone.now(),
+                qualite_donnee='bonne',
+                source_donnee='capteur_reel',
+                est_valide=True,
+                donnees_brutes=json.dumps({
+                    'humidity': humidity,
+                    'battery_voltage': battery_voltage,
+                    'wifi_signal': wifi_signal,
+                    'cpu_temperature': cpu_temperature,
+                    'uptime_seconds': uptime_seconds,
+                    'timestamp': timestamp
+                }, default=str)
+            )
+            mesures_crees.append(f"Humidité: {humidity}%")
+        
+        # Mesure pluie (NOUVEAU)
+        if rain_percent is not None:
+            mesure_pluie = MesureArduino.objects.create(
+                capteur=capteur,
+                valeur=rain_percent,
+                unite='%',
+                timestamp=timezone.now(),
+                qualite_donnee='bonne',
+                source_donnee='capteur_reel',
+                est_valide=True,
+                donnees_brutes=json.dumps({
+                    'rain_percent': rain_percent,
+                    'battery_voltage': battery_voltage,
+                    'wifi_signal': wifi_signal,
+                    'cpu_temperature': cpu_temperature,
+                    'uptime_seconds': uptime_seconds,
+                    'timestamp': timestamp
+                }, default=str)
+            )
+            mesures_crees.append(f"Pluie: {rain_percent}%")
+        
+        # Mesure quantité d'eau (NOUVEAU)
+        if water_percent is not None:
+            mesure_eau = MesureArduino.objects.create(
+                capteur=capteur,
+                valeur=water_percent,
+                unite='%',
+                timestamp=timezone.now(),
+                qualite_donnee='bonne',
+                source_donnee='capteur_reel',
+                est_valide=True,
+                donnees_brutes=json.dumps({
+                    'water_percent': water_percent,
+                    'battery_voltage': battery_voltage,
+                    'wifi_signal': wifi_signal,
+                    'cpu_temperature': cpu_temperature,
+                    'uptime_seconds': uptime_seconds,
+                    'timestamp': timestamp
+                }, default=str)
+            )
+            mesures_crees.append(f"Quantité d'eau: {water_percent}%")
+        
+        # Mettre à jour la dernière communication du capteur
+        capteur.date_derniere_communication = timezone.now()
+        capteur.tension_batterie = battery_voltage
+        capteur.niveau_signal_wifi = wifi_signal
+        capteur.temperature_cpu = cpu_temperature
+        capteur.save()
+        
+        # Déclencher l'analyse automatique des mesures capteurs
+        try:
+            from .services_analyse_capteurs import analyse_capteurs_service
+            analyse_result = analyse_capteurs_service.analyser_mesures_capteurs(capteur.id)
+            logger.info(f"Analyse automatique des capteurs déclenchée: {analyse_result}")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse automatique des capteurs: {e}")
+        
+        return Response({
+            'success': True,
+            'message': f'Mesures reçues pour {capteur.nom}',
+            'mesures': mesures_crees,
+            'capteur_id': capteur.id,
+            'timestamp': str(timezone.now()),
+            'analyse_auto': 'déclenchée'
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la réception des mesures: {str(e)}")
+        return Response({
+            'success': False,
+            'message': f'Erreur serveur: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

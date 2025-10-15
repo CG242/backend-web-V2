@@ -1,14 +1,18 @@
 """
 Service de fusion et analyse des événements externes avec les mesures Arduino
-Version simplifiée sans dépendances sklearn
+NOTE: Cette analyse dérive des DERNIÈRES mesures capteurs disponibles et des
+événements récents autour de l'événement reçu.
 """
 
 import logging
+import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from django.utils import timezone
 from django.db.models import Q, Avg, Max, Min, Count
 import json
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
 
 from ..models import (
     EvenementExterne, MesureArduino, Zone, FusionDonnees, 
@@ -190,11 +194,9 @@ class AnalyseFusionService:
                 'id': evenement.id,
                 'type_evenement': evenement.type_evenement,
                 'intensite': evenement.intensite,
-                'intensite_categorie': evenement.intensite_categorie,
                 'date_evenement': evenement.date_evenement,
                 'source': evenement.source,
-                'duree_minutes': evenement.duree_minutes,
-                'rayon_impact_km': evenement.rayon_impact_km,
+                'duree': getattr(evenement, 'duree', ''),
                 'niveau_risque': evenement.niveau_risque
             })
         
@@ -315,12 +317,21 @@ class AnalyseFusionService:
         modificateur = modificateurs.get(evenement.type_evenement, 1.0)
         score *= modificateur
         
-        # Bonus pour durée et rayon d'impact
-        if evenement.duree_minutes:
-            score += min(evenement.duree_minutes / 60, 10)  # Max 10 points pour durée
-        
-        if evenement.rayon_impact_km:
-            score += min(evenement.rayon_impact_km, 15)  # Max 15 points pour rayon
+        # Bonus pour durée
+        duree_txt = getattr(evenement, 'duree', '') or ''
+        try:
+            # Support formats simples: "2h", "90min"
+            minutes = 0
+            if isinstance(duree_txt, str) and duree_txt:
+                s = duree_txt.strip().lower()
+                if s.endswith('h'):
+                    minutes = float(s[:-1]) * 60
+                elif s.endswith('min'):
+                    minutes = float(s[:-3])
+            if minutes > 0:
+                score += min(minutes / 60, 10)
+        except Exception:
+            pass
         
         return min(score, 100)
     

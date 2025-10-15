@@ -205,7 +205,7 @@ class PredictionViewSet(viewsets.ModelViewSet):
     serializer_class = PredictionSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['zone', 'modele_utilise']
+    filterset_fields = ['zone', 'modele_ml']
     search_fields = ['commentaires']
     ordering_fields = ['date_prediction', 'horizon_jours', 'confiance_pourcentage']
     ordering = ['-date_prediction']

@@ -1,6 +1,7 @@
 from django.contrib import admin
+from django.utils.html import format_html
 from .models import (
-    Utilisateur, Zone, HistoriqueErosion, Prediction, TendanceLongTerme, 
+    Utilisateur, Zone, HistoriqueErosion, Prediction, ModeleML, TendanceLongTerme, 
     Alerte, EvenementClimatique, JournalAction,
     CapteurArduino, MesureArduino, DonneesManquantes, LogCapteurArduino,
     EvenementExterne, FusionDonnees, PredictionEnrichie, AlerteEnrichie, ArchiveDonnees
@@ -35,10 +36,50 @@ class HistoriqueErosionAdmin(admin.ModelAdmin):
     ordering = ['-date_mesure']
 
 
+@admin.register(ModeleML)
+class ModeleMLAdmin(admin.ModelAdmin):
+    list_display = ['nom', 'version', 'type_modele', 'statut', 'precision_score', 'nombre_predictions', 'date_creation']
+    list_filter = ['type_modele', 'statut', 'date_creation']
+    search_fields = ['nom', 'version', 'commentaires']
+    ordering = ['-date_creation']
+    readonly_fields = ['date_creation', 'date_derniere_utilisation', 'nombre_predictions']
+    
+    fieldsets = (
+        ('Informations générales', {
+            'fields': ('nom', 'version', 'type_modele', 'statut')
+        }),
+        ('Fichier modèle', {
+            'fields': ('chemin_fichier',)
+        }),
+        ('Performances', {
+            'fields': ('precision_score', 'parametres_entrainement', 'features_utilisees')
+        }),
+        ('Statistiques', {
+            'fields': ('nombre_predictions', 'date_derniere_utilisation', 'date_creation')
+        }),
+        ('Commentaires', {
+            'fields': ('commentaires',)
+        }),
+    )
+    
+    actions = ['marquer_comme_actif', 'marquer_comme_inactif']
+    
+    def marquer_comme_actif(self, request, queryset):
+        for model in queryset:
+            model.marquer_comme_actif()
+        self.message_user(request, f"{queryset.count()} modèles marqués comme actifs.")
+    marquer_comme_actif.short_description = "Marquer comme actifs"
+    
+    def marquer_comme_inactif(self, request, queryset):
+        queryset.update(statut='inactif')
+        self.message_user(request, f"{queryset.count()} modèles marqués comme inactifs.")
+    marquer_comme_inactif.short_description = "Marquer comme inactifs"
+
+
 @admin.register(Prediction)
 class PredictionAdmin(admin.ModelAdmin):
-    list_display = ['zone', 'date_prediction', 'horizon_jours', 'taux_erosion_pred_m_an', 'confiance_pourcentage']
-    list_filter = ['zone', 'modele_utilise', 'date_prediction']
+    list_display = ['zone', 'modele_ml', 'date_prediction', 'horizon_jours', 'taux_erosion_pred_m_an', 'confiance_pourcentage']
+    list_filter = ['zone', 'modele_ml', 'date_prediction']
     search_fields = ['zone__nom', 'commentaires']
     ordering = ['-date_prediction']
 
@@ -53,10 +94,11 @@ class TendanceLongTermeAdmin(admin.ModelAdmin):
 
 @admin.register(Alerte)
 class AlerteAdmin(admin.ModelAdmin):
-    list_display = ['titre', 'zone', 'type', 'niveau', 'est_resolue', 'date_creation']
-    list_filter = ['type', 'niveau', 'est_resolue', 'zone', 'date_creation']
-    search_fields = ['titre', 'description', 'zone__nom']
+    list_display = ['titre', 'niveau_urgence', 'zone', 'statut', 'source', 'date_creation', 'date_mise_a_jour']
+    list_filter = ['niveau_urgence', 'statut', 'source', 'date_creation']
+    search_fields = ['titre', 'description', 'zone', 'source']
     ordering = ['-date_creation']
+    readonly_fields = ['date_creation', 'date_mise_a_jour']
 
 
 @admin.register(EvenementClimatique)
@@ -167,42 +209,50 @@ class LogCapteurArduinoAdmin(admin.ModelAdmin):
 
 @admin.register(EvenementExterne)
 class EvenementExterneAdmin(admin.ModelAdmin):
-    list_display = ['type_evenement', 'intensite', 'zone', 'date_evenement', 'source', 'is_simulation']
-    list_filter = ['type_evenement', 'intensite', 'is_simulation', 'zone', 'date_evenement']
-    search_fields = ['type_evenement', 'description', 'zone__nom', 'source']
+    list_display = ['type_evenement', 'intensite', 'duree', 'zone', 'date_evenement', 'source', 'niveau_risque', 'date_reception']
+    list_filter = ['type_evenement', 'niveau_risque', 'statut', 'source', 'is_simulation', 'zone', 'date_evenement']
+    search_fields = ['type_evenement', 'zone__nom', 'source', 'id_source']
     ordering = ['-date_evenement']
-    readonly_fields = ['date_evenement']
+    readonly_fields = ['date_evenement', 'date_creation', 'date_modification', 'niveau_risque', 'zone_erosion']
     date_hierarchy = 'date_evenement'
     
     fieldsets = (
         ('Événement', {
-            'fields': ('type_evenement', 'intensite', 'description', 'date_evenement')
+            'fields': ('type_evenement', 'intensite', 'duree', 'date_evenement', 'statut')
+        }),
+        ('Risque d\'érosion (calculé automatiquement)', {
+            'fields': ('niveau_risque', 'zone_erosion'),
+            'classes': ('collapse',)
         }),
         ('Localisation', {
-            'fields': ('zone',)
+            'fields': ('zone', 'latitude', 'longitude')
         }),
         ('Source', {
-            'fields': ('source', 'metadata', 'is_simulation')
+            'fields': ('source', 'id_source', 'donnees_meteo', 'is_simulation')
+        }),
+        ('Métadonnées', {
+            'fields': ('commentaires', 'date_creation', 'date_modification'),
+            'classes': ('collapse',)
         }),
     )
     
-    actions = ['marquer_comme_valide', 'marquer_comme_invalide', 'purger_simulations']
+    actions = ['marquer_comme_valide', 'marquer_comme_simulation', 'purger_simulations']
     
     def marquer_comme_valide(self, request, queryset):
-        queryset.update(is_simulation=False)
-        self.message_user(request, f"{queryset.count()} événements marqués comme valides.")
-    marquer_comme_valide.short_description = "Marquer comme valides"
+        queryset.update(is_simulation=False, is_valide=True)
+        self.message_user(request, f"{queryset.count()} événements marqués comme valides (données réelles).")
+    marquer_comme_valide.short_description = "✅ Marquer comme données réelles"
     
-    def marquer_comme_invalide(self, request, queryset):
+    def marquer_comme_simulation(self, request, queryset):
         queryset.update(is_simulation=True)
-        self.message_user(request, f"{queryset.count()} événements marqués comme invalides.")
-    marquer_comme_invalide.short_description = "Marquer comme invalides"
+        self.message_user(request, f"{queryset.count()} événements marqués comme simulations (tests internes).")
+    marquer_comme_simulation.short_description = "🔧 Marquer comme simulation/test"
     
     def purger_simulations(self, request, queryset):
         count = queryset.filter(is_simulation=True).count()
         queryset.filter(is_simulation=True).delete()
         self.message_user(request, f"{count} événements de simulation supprimés.")
-    purger_simulations.short_description = "Purger les simulations"
+    purger_simulations.short_description = "🗑️ Supprimer les simulations"
 
 
 @admin.register(FusionDonnees)
@@ -227,12 +277,28 @@ class PredictionEnrichieAdmin(admin.ModelAdmin):
 
 @admin.register(AlerteEnrichie)
 class AlerteEnrichieAdmin(admin.ModelAdmin):
-    list_display = ['titre', 'zone', 'type', 'niveau', 'est_active', 'est_resolue', 'date_creation']
+    list_display = ['titre', 'zone', 'type', 'niveau', 'est_active', 'est_resolue', 'date_creation', 'envoyer_alerte']
     list_filter = ['type', 'niveau', 'est_active', 'est_resolue', 'zone', 'date_creation']
     search_fields = ['titre', 'description', 'zone__nom']
     ordering = ['-date_creation']
     readonly_fields = ['date_creation']
     date_hierarchy = 'date_creation'
+    
+    def envoyer_alerte(self, obj):
+        """Bouton pour envoyer l'alerte au système externe"""
+        if obj.est_active and not obj.est_resolue:
+            return format_html(
+                '<a class="button" href="javascript:void(0)" '
+                'onclick="envoyerAlerte({})" style="background-color: #28a745; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;">'
+                '📤 Envoyer'
+                '</a>',
+                obj.id
+            )
+        return "N/A"
+    envoyer_alerte.short_description = "Envoyer"
+    
+    class Media:
+        js = ('admin/js/alerte_envoi.js',)
 
 
 @admin.register(ArchiveDonnees)

@@ -157,27 +157,101 @@ class Mesure(models.Model):
         return f"{self.capteur.nom} - {self.valeur} {self.unite} ({self.timestamp.strftime('%Y-%m-%d %H:%M')})"
 
 
+class ModeleML(models.Model):
+    """Modèle de Machine Learning pour la prédiction d'érosion"""
+    TYPE_MODELE_CHOICES = [
+        ('random_forest', 'Random Forest'),
+        ('regression_lineaire', 'Régression Linéaire'),
+        ('gradient_boosting', 'Gradient Boosting'),
+        ('neural_network', 'Réseau de Neurones'),
+        ('svm', 'Support Vector Machine'),
+    ]
+    
+    STATUT_CHOICES = [
+        ('actif', 'Actif'),
+        ('inactif', 'Inactif'),
+        ('entrainement', 'En entraînement'),
+        ('erreur', 'Erreur'),
+    ]
+    
+    nom = models.CharField(max_length=100, unique=True)
+    version = models.CharField(max_length=20, default='1.0')
+    type_modele = models.CharField(max_length=30, choices=TYPE_MODELE_CHOICES)
+    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default='inactif')
+    chemin_fichier = models.CharField(max_length=255, help_text="Chemin vers le fichier du modèle sauvegardé")
+    precision_score = models.FloatField(null=True, blank=True, help_text="Score de précision du modèle")
+    parametres_entrainement = models.JSONField(default=dict, blank=True)
+    features_utilisees = models.JSONField(default=list, blank=True, help_text="Liste des features utilisées")
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_derniere_utilisation = models.DateTimeField(null=True, blank=True)
+    nombre_predictions = models.IntegerField(default=0)
+    commentaires = models.TextField(blank=True)
+    
+    class Meta:
+        verbose_name = "Modèle ML"
+        verbose_name_plural = "Modèles ML"
+        ordering = ['-date_creation']
+        unique_together = ['nom', 'version']
+    
+    def __str__(self):
+        return f"{self.nom} v{self.version} ({self.type_modele})"
+    
+    def marquer_comme_actif(self):
+        """Marque ce modèle comme actif et désactive les autres"""
+        ModeleML.objects.filter(statut='actif').update(statut='inactif')
+        self.statut = 'actif'
+        self.save()
+
+
 class Prediction(models.Model):
-    """Prédiction d'érosion basée sur les données"""
+    """Prédiction d'érosion basée sur les données ML"""
     zone = models.ForeignKey(Zone, on_delete=models.CASCADE, related_name='predictions')
+    modele_ml = models.ForeignKey(ModeleML, on_delete=models.CASCADE, related_name='predictions', null=True, blank=True)
     date_prediction = models.DateTimeField(default=timezone.now)
     horizon_jours = models.IntegerField(help_text="Horizon de prédiction en jours")
+    
+    # Prédiction principale
     taux_erosion_pred_m_an = models.FloatField(help_text="Taux d'érosion prédit en m/an")
+    
+    # Intervalle de confiance
+    taux_erosion_min_m_an = models.FloatField(help_text="Taux d'érosion minimum (intervalle de confiance)", default=0.0)
+    taux_erosion_max_m_an = models.FloatField(help_text="Taux d'érosion maximum (intervalle de confiance)", default=0.0)
+    
+    # Métriques de confiance
     confiance_pourcentage = models.FloatField(
         validators=[MinValueValidator(0), MaxValueValidator(100)],
-        help_text="Niveau de confiance en pourcentage"
+        help_text="Niveau de confiance en pourcentage",
+        default=50.0
     )
-    modele_utilise = models.CharField(max_length=100)
-    parametres_modele = models.JSONField(default=dict, blank=True)
+    score_confiance = models.FloatField(null=True, blank=True, help_text="Score de confiance du modèle")
+    
+    # Données d'entrée utilisées pour la prédiction
+    features_entree = models.JSONField(default=dict, blank=True, help_text="Features utilisées pour la prédiction")
+    
+    # Métadonnées
+    parametres_prediction = models.JSONField(default=dict, blank=True)
     commentaires = models.TextField(blank=True)
     
     class Meta:
         verbose_name = "Prédiction"
         verbose_name_plural = "Prédictions"
         ordering = ['-date_prediction']
+        indexes = [
+            models.Index(fields=['zone', 'date_prediction']),
+            models.Index(fields=['modele_ml', 'date_prediction']),
+        ]
     
     def __str__(self):
         return f"{self.zone.nom} - Prédiction {self.horizon_jours}j ({self.date_prediction.strftime('%Y-%m-%d')})"
+    
+    @property
+    def intervalle_confiance(self):
+        """Retourne l'intervalle de confiance sous forme de dictionnaire"""
+        return {
+            'min': self.taux_erosion_min_m_an,
+            'max': self.taux_erosion_max_m_an,
+            'largeur': self.taux_erosion_max_m_an - self.taux_erosion_min_m_an
+        }
 
 
 class TendanceLongTerme(models.Model):
@@ -207,51 +281,42 @@ class TendanceLongTerme(models.Model):
 
 
 class Alerte(models.Model):
-    """Système d'alerte pour les événements critiques"""
-    NIVEAU_CHOICES = [
-        ('info', 'Information'),
-        ('attention', 'Attention'),
-        ('alerte', 'Alerte'),
+    """Système d'alerte pour les événements critiques d'érosion côtière"""
+    NIVEAU_URGENCE_CHOICES = [
+        ('faible', 'Faible'),
+        ('modéré', 'Modéré'),
+        ('élevé', 'Élevé'),
         ('critique', 'Critique'),
     ]
     
-    TYPE_CHOICES = [
-        ('erosion_acceleree', 'Érosion accélérée'),
-        ('capteur_defaillant', 'Capteur défaillant'),
-        ('donnee_anormale', 'Donnée anormale'),
-        ('maintenance_requise', 'Maintenance requise'),
-        ('evenement_climatique', 'Événement climatique'),
+    STATUT_CHOICES = [
+        ('active', 'Active'),
+        ('resolue', 'Résolue'),
+        ('archivée', 'Archivée'),
     ]
     
-    zone = models.ForeignKey(Zone, on_delete=models.CASCADE, related_name='alertes')
-    type = models.CharField(max_length=30, choices=TYPE_CHOICES)
-    niveau = models.CharField(max_length=20, choices=NIVEAU_CHOICES)
-    titre = models.CharField(max_length=200)
-    description = models.TextField()
-    date_creation = models.DateTimeField(default=timezone.now)
-    date_resolution = models.DateTimeField(null=True, blank=True)
-    est_resolue = models.BooleanField(default=False)
-    utilisateur_creation = models.ForeignKey(
-        Utilisateur, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        related_name='alertes_crees'
-    )
-    utilisateur_resolution = models.ForeignKey(
-        Utilisateur, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True,
-        related_name='alertes_resolues'
-    )
+    # Champs dans l'ordre de la structure SQL
+    titre = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    niveau_urgence = models.CharField(max_length=20, choices=NIVEAU_URGENCE_CHOICES, default='faible')
+    latitude = models.DecimalField(max_digits=10, decimal_places=8, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=11, decimal_places=8, null=True, blank=True)
+    zone = models.CharField(max_length=255, blank=True, null=True)
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_mise_a_jour = models.DateTimeField(auto_now=True)
+    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default='active')
+    source = models.CharField(max_length=100, blank=True, null=True)
+    donnees_meteo = models.JSONField(default=dict, blank=True)
+    donnees_marines = models.JSONField(default=dict, blank=True)
     
     class Meta:
         verbose_name = "Alerte"
         verbose_name_plural = "Alertes"
         ordering = ['-date_creation']
+        db_table = 'alertes'
     
     def __str__(self):
-        return f"{self.titre} - {self.niveau}"
+        return f"{self.titre} - {self.niveau_urgence}"
 
 
 class EvenementClimatique(models.Model):
@@ -896,66 +961,88 @@ class EvenementExterne(models.Model):
     
     TYPE_CHOICES = [
         ('pluie', 'Pluie'),
-        ('tempete', 'Tempête'),
         ('vent_fort', 'Vent fort'),
-        ('vague', 'Vague élevée'),
+        ('houle', 'Houle'),
+        ('maree_haute', 'Marée haute'),
+        ('tempete', 'Tempête'),
+        ('ouragan', 'Ouragan'),
+        ('cyclone', 'Cyclone'),
+        ('tsunami', 'Tsunami'),
         ('maree_exceptionnelle', 'Marée exceptionnelle'),
         ('secheresse', 'Sécheresse'),
         ('inondation', 'Inondation'),
-        ('tsunami', 'Tsunami'),
-        ('ouragan', 'Ouragan'),
-        ('cyclone', 'Cyclone'),
         ('autre', 'Autre'),
     ]
     
-    INTENSITE_CHOICES = [
-        ('faible', 'Faible (0-25%)'),
-        ('moderee', 'Modérée (26-50%)'),
-        ('forte', 'Forte (51-75%)'),
-        ('extreme', 'Extrême (76-100%)'),
+    STATUT_CHOICES = [
+        ('envoye', 'Envoyé'),
+        ('en_cours', 'En cours'),
+        ('termine', 'Terminé'),
+        ('recu', 'Reçu'),
     ]
     
-    # Informations de base
+    SOURCE_CHOICES = [
+        ('manuel', 'Manuel'),
+        ('capteur', 'Capteur'),
+        ('api', 'API'),
+        ('externe', 'Externe'),
+    ]
+    
+    NIVEAU_RISQUE_CHOICES = [
+        ('faible', 'Faible'),
+        ('modere', 'Modéré'),
+        ('eleve', 'Élevé'),
+        ('critique', 'Critique'),
+    ]
+    
+    ZONE_EROSION_CHOICES = [
+        ('non_determinee', 'Non déterminée'),
+        ('cotes_rocheuses', 'Côtes rocheuses'),
+        ('dunes_cotieres', 'Dunes côtières'),
+        ('plages_sableuses', 'Plages sableuses'),
+        ('zones_basses', 'Zones basses'),
+        ('falaises', 'Falaises'),
+        ('estuaires', 'Estuaires'),
+    ]
+    
+    # Champs obligatoires selon le format de votre ami
     type_evenement = models.CharField(max_length=50, choices=TYPE_CHOICES)
-    intensite = models.FloatField(
-        help_text="Intensité de 0 à 100",
-        validators=[MinValueValidator(0), MaxValueValidator(100)]
-    )
-    intensite_categorie = models.CharField(
-        max_length=20, 
-        choices=INTENSITE_CHOICES,
-        help_text="Catégorie d'intensité calculée automatiquement"
-    )
-    description = models.TextField(blank=True, null=True)
-    
-    # Géolocalisation et timing
-    zone = models.ForeignKey(Zone, on_delete=models.CASCADE, related_name='evenements_externes')
+    intensite = models.FloatField(help_text="Intensité de l'événement")
+    duree = models.CharField(max_length=20, default='1h', help_text="Durée de l'événement (ex: 2h, 30min)")
     date_evenement = models.DateTimeField(help_text="Date/heure de l'événement")
-    date_reception = models.DateTimeField(auto_now_add=True, help_text="Date/heure de réception par le backend")
+    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default='recu')
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='externe')
+    id_source = models.IntegerField(null=True, blank=True, help_text="ID unique de l'événement dans la source")
     
-    # Métadonnées et provenance
-    source = models.CharField(max_length=100, help_text="Source de l'événement (ex: MeteoFrance, NOAA)")
-    source_id = models.CharField(max_length=100, blank=True, null=True, help_text="ID unique dans la source")
-    metadata = models.JSONField(default=dict, blank=True, help_text="Métadonnées supplémentaires")
-    
-    # Données techniques
-    duree_minutes = models.PositiveIntegerField(null=True, blank=True, help_text="Durée estimée en minutes")
-    rayon_impact_km = models.FloatField(null=True, blank=True, help_text="Rayon d'impact en kilomètres")
-    
-    # Statut et validation
-    is_simulation = models.BooleanField(default=False, help_text="Marquer si c'est une donnée de test/simulation")
-    is_valide = models.BooleanField(default=True, help_text="Événement validé par le système")
-    is_traite = models.BooleanField(default=False, help_text="Événement traité pour fusion/analyse")
-    
-    # Liens avec autres données
-    evenements_lies = models.ManyToManyField(
-        'self', 
-        blank=True, 
-        symmetrical=False,
-        help_text="Événements liés ou corrélés"
+    # Champs calculés automatiquement pour l'érosion
+    niveau_risque = models.CharField(
+        max_length=20, 
+        choices=NIVEAU_RISQUE_CHOICES,
+        default='faible',
+        help_text="Niveau de risque calculé automatiquement"
     )
+    zone_erosion = models.CharField(
+        max_length=30,
+        choices=ZONE_EROSION_CHOICES,
+        default='non_determinee',
+        help_text="Zone d'érosion affectée"
+    )
+    
+    # Géolocalisation optionnelle
+    latitude = models.FloatField(null=True, blank=True, help_text="Latitude")
+    longitude = models.FloatField(null=True, blank=True, help_text="Longitude")
+    zone = models.ForeignKey(Zone, on_delete=models.SET_NULL, null=True, blank=True, related_name='evenements_externes')
+    
+    # Données météo supplémentaires (JSON)
+    donnees_meteo = models.JSONField(default=dict, help_text="Données météo supplémentaires")
     
     # Métadonnées système
+    date_reception = models.DateTimeField(auto_now_add=True, help_text="Date/heure de réception par le backend")
+    is_traite = models.BooleanField(default=False, help_text="Événement traité par le système")
+    is_valide = models.BooleanField(default=True, help_text="Événement validé")
+    is_simulation = models.BooleanField(default=False, help_text="Données de simulation")
+    
+    # Métadonnées
     commentaires = models.TextField(blank=True)
     date_creation = models.DateTimeField(auto_now_add=True)
     date_modification = models.DateTimeField(auto_now=True)
@@ -965,27 +1052,70 @@ class EvenementExterne(models.Model):
         verbose_name_plural = "Événements externes"
         ordering = ['-date_evenement']
         indexes = [
-            models.Index(fields=['zone', 'date_evenement']),
             models.Index(fields=['type_evenement', 'intensite']),
+            models.Index(fields=['date_evenement', 'statut']),
             models.Index(fields=['source', 'date_reception']),
+            models.Index(fields=['niveau_risque', 'zone_erosion']),
             models.Index(fields=['is_traite', 'is_valide']),
         ]
     
     def save(self, *args, **kwargs):
-        # Calculer automatiquement la catégorie d'intensité
-        if self.intensite <= 25:
-            self.intensite_categorie = 'faible'
-        elif self.intensite <= 50:
-            self.intensite_categorie = 'moderee'
-        elif self.intensite <= 75:
-            self.intensite_categorie = 'forte'
-        else:
-            self.intensite_categorie = 'extreme'
-        
+        # Calculer automatiquement le niveau de risque et la zone d'érosion
+        self._calculer_risque_erosion()
         super().save(*args, **kwargs)
     
+    def _calculer_risque_erosion(self):
+        """Calcule le niveau de risque d'érosion basé sur le type et l'intensité"""
+        type_event = self.type_evenement
+        intensite = self.intensite
+        
+        # Calcul du niveau de risque
+        if type_event == 'pluie':
+            if intensite > 50:
+                self.niveau_risque = 'eleve'
+            elif intensite > 20:
+                self.niveau_risque = 'modere'
+            else:
+                self.niveau_risque = 'faible'
+            self.zone_erosion = 'cotes_rocheuses'
+            
+        elif type_event == 'vent_fort':
+            if intensite > 60:
+                self.niveau_risque = 'eleve'
+            elif intensite > 40:
+                self.niveau_risque = 'modere'
+            else:
+                self.niveau_risque = 'faible'
+            self.zone_erosion = 'dunes_cotieres'
+            
+        elif type_event == 'houle':
+            if intensite > 3:
+                self.niveau_risque = 'eleve'
+            elif intensite > 2:
+                self.niveau_risque = 'modere'
+            else:
+                self.niveau_risque = 'faible'
+            self.zone_erosion = 'plages_sableuses'
+            
+        elif type_event == 'maree_haute':
+            self.niveau_risque = 'modere'
+            self.zone_erosion = 'zones_basses'
+            
+        elif type_event in ['tempete', 'ouragan', 'cyclone']:
+            if intensite > 80:
+                self.niveau_risque = 'critique'
+            elif intensite > 60:
+                self.niveau_risque = 'eleve'
+            else:
+                self.niveau_risque = 'modere'
+            self.zone_erosion = 'plages_sableuses'
+            
+        else:
+            self.niveau_risque = 'faible'
+            self.zone_erosion = 'non_determinee'
+    
     def __str__(self):
-        return f"{self.get_type_evenement_display()} {self.intensite}% - {self.zone.nom} ({self.date_evenement.strftime('%Y-%m-%d %H:%M')})"
+        return f"{self.get_type_evenement_display()} - {self.intensite} - {self.date_evenement.strftime('%Y-%m-%d %H:%M')}"
     
     @property
     def est_recent(self):
@@ -994,16 +1124,9 @@ class EvenementExterne(models.Model):
         return timezone.now() - self.date_evenement < timedelta(hours=24)
     
     @property
-    def niveau_risque(self):
-        """Calcule le niveau de risque basé sur l'intensité et le type"""
-        if self.intensite >= 80:
-            return 'critique'
-        elif self.intensite >= 60:
-            return 'eleve'
-        elif self.intensite >= 40:
-            return 'modere'
-        else:
-            return 'faible'
+    def necessite_alerte(self):
+        """Détermine si l'événement nécessite une alerte"""
+        return self.niveau_risque in ['eleve', 'critique']
 
 
 class FusionDonnees(models.Model):

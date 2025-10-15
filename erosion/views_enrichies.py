@@ -307,7 +307,7 @@ class PredictionEnrichieViewSet(viewsets.ViewSet):
                 'analyses_detaillees': [analyse.calculs_detaille],
                 'recommandations': analyse.recommandations,
                 'niveau_urgence': analyse.niveau_urgence,
-                'modele_utilise': analyse.modele_utilise,
+                'modele_ml': analyse.modele_ml.nom if analyse.modele_ml else 'N/A',
                 'version_modele': '1.0',
                 'date_calcul': analyse.date_analyse
             }

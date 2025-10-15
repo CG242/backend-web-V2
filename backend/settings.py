@@ -144,7 +144,11 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [
+    BASE_DIR / 'static',
+]
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -200,6 +204,21 @@ SIMPLE_JWT = {
     'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
 
+# REST Framework Configuration
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+}
+
 # CORS Settings
 CORS_ALLOW_ALL_ORIGINS = True  # Pour le développement seulement
 CORS_ALLOWED_ORIGINS = [
@@ -222,7 +241,9 @@ except ImportError:
     # Celery n'est pas installé, continuer sans
     pass
 
-# Configuration Swagger/OpenAPI
+# Configuration des URLs externes
+ALERTE_EXTERNE_URL = os.getenv('ALERTE_EXTERNE_URL', 'http://192.168.100.168:8000/alertes')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://192.168.100.168:8000/alertes')
 SPECTACULAR_SETTINGS = {
     'TITLE': 'API Surveillance Érosion Côtière',
     'DESCRIPTION': 'API REST pour la surveillance et la prédiction de l\'érosion côtière avec données géospatiales PostGIS',

@@ -31,3 +31,9 @@ pandas==2.1.4
 
 # Géospatial (installé via conda)
 # GDAL installé via conda-forge
+
+# Machine Learning
+scikit-learn==1.3.2
+joblib==1.3.2
+numpy==1.24.4
+pandas==2.1.4

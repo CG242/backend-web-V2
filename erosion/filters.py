@@ -48,7 +48,7 @@ class MesureFilter(django_filters.FilterSet):
 class PredictionFilter(django_filters.FilterSet):
     """Filtres pour le modèle Prediction"""
     zone = django_filters.ModelChoiceFilter(queryset=Zone.objects.all())
-    modele_utilise = django_filters.CharFilter(lookup_expr='icontains')
+    modele_ml = django_filters.CharFilter(field_name='modele_ml__nom', lookup_expr='icontains')
     horizon_min = django_filters.NumberFilter(field_name='horizon_jours', lookup_expr='gte')
     horizon_max = django_filters.NumberFilter(field_name='horizon_jours', lookup_expr='lte')
     confiance_min = django_filters.NumberFilter(field_name='confiance_pourcentage', lookup_expr='gte')
@@ -56,20 +56,20 @@ class PredictionFilter(django_filters.FilterSet):
     
     class Meta:
         model = Prediction
-        fields = ['zone', 'modele_utilise', 'horizon_min', 'horizon_max', 'confiance_min', 'confiance_max']
+        fields = ['zone', 'modele_ml', 'horizon_min', 'horizon_max', 'confiance_min', 'confiance_max']
 
 
 class AlerteFilter(django_filters.FilterSet):
-    """Filtres pour le modèle Alerte"""
-    zone = django_filters.ModelChoiceFilter(queryset=Zone.objects.all())
-    type = django_filters.ChoiceFilter(choices=Alerte._meta.get_field('type').choices)
-    niveau = django_filters.ChoiceFilter(choices=Alerte._meta.get_field('niveau').choices)
-    est_resolue = django_filters.BooleanFilter()
+    """Filtres pour le modèle Alerte d'érosion côtière"""
+    zone = django_filters.CharFilter(lookup_expr='icontains')
+    niveau_urgence = django_filters.ChoiceFilter(choices=Alerte._meta.get_field('niveau_urgence').choices)
+    statut = django_filters.ChoiceFilter(choices=Alerte._meta.get_field('statut').choices)
     titre = django_filters.CharFilter(lookup_expr='icontains')
+    source = django_filters.CharFilter(lookup_expr='icontains')
     
     class Meta:
         model = Alerte
-        fields = ['zone', 'type', 'niveau', 'est_resolue', 'titre']
+        fields = ['zone', 'niveau_urgence', 'statut', 'titre', 'source']
 
 
 class HistoriqueErosionFilter(django_filters.FilterSet):

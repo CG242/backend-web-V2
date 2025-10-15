@@ -22,6 +22,7 @@ from .serializers import (
     RapportFusionSerializer
 )
 from .services.analyse_fusion_service import AnalyseFusionService
+from .ml_services import MLPredictionService
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,13 @@ class EvenementExterneViewSet(viewsets.ModelViewSet):
         
         return queryset
     
-    @action(detail=False, methods=['post'], url_path='recevoir-evenement')
+    @action(detail=False, methods=['post'], url_path='recevoir-evenement', permission_classes=[])
     def recevoir_evenement(self, request):
         """
         Endpoint pour recevoir un événement externe via API
+        NOTE: Cette analyse et la prédiction déclenchées ci-dessous dérivent UNIQUEMENT
+        du dernier événement reçu (celui-ci) et des DERNIÈRES mesures capteurs
+        disponibles sur la zone associée.
         """
         serializer = EvenementExterneReceptionSerializer(data=request.data)
         
@@ -67,22 +71,67 @@ class EvenementExterneViewSet(viewsets.ModelViewSet):
             try:
                 # Créer l'événement
                 evenement = serializer.save()
+                # Si aucune zone fournie, attribuer automatiquement une zone basée sur les capteurs actifs
+                if not evenement.zone_id:
+                    try:
+                        from .models import CapteurArduino
+                        capteur_recent = CapteurArduino.objects.filter(actif=True).order_by('-date_derniere_communication').first()
+                        if capteur_recent and capteur_recent.zone_id:
+                            evenement.zone_id = capteur_recent.zone_id
+                            evenement.save()
+                            logger.info(f"Zone auto-assignée depuis capteur: zone_id={evenement.zone_id}")
+                        else:
+                            # Fallback: zone 'Pointe-Noire' si disponible, sinon première zone
+                            zone_defaut = Zone.objects.filter(nom__iexact='Pointe-Noire').first() or Zone.objects.first()
+                            if zone_defaut:
+                                evenement.zone_id = zone_defaut.id
+                                evenement.save()
+                                logger.info(f"Zone auto-assignée par défaut: zone_id={evenement.zone_id}")
+                    except Exception as e:
+                        logger.warning(f"Impossible d'auto-assigner une zone: {e}")
                 
                 # Marquer comme traité pour déclencher l'analyse
                 evenement.is_traite = True
                 evenement.save()
                 
-                # Déclencher l'analyse de fusion en arrière-plan
-                from .tasks import analyser_fusion_evenement
-                analyser_fusion_evenement.delay(evenement.id)
+                # Déclenchement synchrone: analyse et (si dispo) prédiction ML
+                analyse_payload = None
+                prediction_id = None
+                analyse_auto_result = None
+                try:
+                    if evenement.zone_id:
+                        # Analyse automatique avec notre nouveau service
+                        try:
+                            from .services_analyse_auto import analyse_service
+                            analyse_auto_result = analyse_service.analyser_nouvelles_donnees()
+                            logger.info(f"Analyse automatique déclenchée par événement: {analyse_auto_result}")
+                        except Exception as e:
+                            logger.error(f"Erreur analyse automatique: {e}")
+                        
+                        fusion_service = AnalyseFusionService()
+                        # Analyse basée sur l'événement courant et les dernières mesures
+                        analyse_payload = fusion_service.analyser_evenement(evenement.id)
+                        try:
+                            # Prédiction ML basée sur les DERNIÈRES mesures et l'état courant
+                            ml_service = MLPredictionService()
+                            pred = ml_service.predire_erosion(zone_id=evenement.zone_id, features={}, horizon_jours=30)
+                            prediction_id = pred.id
+                        except Exception as e:
+                            logger.warning(f"Prediction ML non exécutée: {e}")
+                    else:
+                        logger.warning("Aucune zone disponible pour l'événement: analyse ignorée")
+                except Exception as e:
+                    logger.warning(f"Analyse synchrone non exécutée: {e}")
                 
                 logger.info(f"Événement externe reçu: {evenement.type_evenement} - {evenement.intensite}%")
                 
                 return Response({
                     'success': True,
-                    'message': 'Événement reçu et en cours de traitement',
+                    'message': 'Événement reçu et analysé sur la base des dernières données',
                     'evenement_id': evenement.id,
-                    'status': 'en_analyse'
+                    'analyse': analyse_payload or {},
+                    'prediction_id': prediction_id,
+                    'status': 'analyse_terminee' if analyse_payload else 'en_analyse'
                 }, status=status.HTTP_201_CREATED)
                 
             except Exception as e:
@@ -124,9 +173,18 @@ class EvenementExterneViewSet(viewsets.ModelViewSet):
                     evenement.save()
                     evenements_crees.append(evenement.id)
                     
-                    # Déclencher l'analyse pour chaque événement
-                    from .tasks import analyser_fusion_evenement
-                    analyser_fusion_evenement.delay(evenement.id)
+                    # Déclenchement synchrone: analyse et (si dispo) prédiction ML
+                    try:
+                        if evenement.zone_id:
+                            fusion_service = AnalyseFusionService()
+                            fusion_service.analyser_evenement(evenement.id)
+                            try:
+                                ml_service = MLPredictionService()
+                                ml_service.predire_erosion(zone_id=evenement.zone_id, features={}, horizon_jours=30)
+                            except Exception as e:
+                                logger.warning(f"Prediction ML non exécutée: {e}")
+                    except Exception as e:
+                        logger.warning(f"Analyse synchrone non exécutée: {e}")
                     
                 except Exception as e:
                     erreurs.append(f"Événement {i+1}: {str(e)}")
@@ -151,9 +209,18 @@ class EvenementExterneViewSet(viewsets.ModelViewSet):
         evenement.is_traite = True
         evenement.save()
         
-        # Déclencher l'analyse de fusion
-        from .tasks import analyser_fusion_evenement
-        analyser_fusion_evenement.delay(evenement.id)
+        # Déclenchement synchrone: analyse + prédiction ML
+        try:
+            if evenement.zone_id:
+                fusion_service = AnalyseFusionService()
+                fusion_service.analyser_evenement(evenement.id)
+                try:
+                    ml_service = MLPredictionService()
+                    ml_service.predire_erosion(zone_id=evenement.zone_id, features={}, horizon_jours=30)
+                except Exception as e:
+                    logger.warning(f"Prediction ML non exécutée: {e}")
+        except Exception as e:
+            logger.warning(f"Analyse synchrone non exécutée: {e}")
         
         return Response({
             'success': True,

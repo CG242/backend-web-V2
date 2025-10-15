@@ -521,3 +521,646 @@ class DataConsolidationService:
         )
         
         return donnees_env
+
+
+# ============================================================================
+# SERVICES MACHINE LEARNING POUR PRÉDICTION D'ÉROSION
+# ============================================================================
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+import os
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+from django.conf import settings
+from django.utils import timezone
+from django.db.models import Avg, Min, Max, Count
+from datetime import datetime, timedelta
+
+from .models import (
+    Zone, HistoriqueErosion, Capteur, Mesure, ModeleML, Prediction,
+    CapteurArduino, MesureArduino, DonneesEnvironnementales
+)
+
+
+class MLPredictionService:
+    """Service de prédiction d'érosion basé sur Machine Learning"""
+    
+    def __init__(self):
+        self.models_dir = Path(settings.BASE_DIR) / 'ml_models'
+        self.models_dir.mkdir(exist_ok=True)
+        self.scaler = StandardScaler()
+    
+    def predire_erosion(self, zone_id: int, features: Dict = None, horizon_jours: int = 30) -> Prediction:
+        """
+        Prédit l'érosion pour une zone donnée
+        
+        Args:
+            zone_id: ID de la zone
+            features: Features supplémentaires (optionnel)
+            horizon_jours: Horizon de prédiction en jours
+            
+        Returns:
+            Objet Prediction créé
+        """
+        logger.info(f"Prédiction d'érosion pour la zone {zone_id}")
+        
+        try:
+            # Récupérer la zone
+            zone = Zone.objects.get(id=zone_id)
+            
+            # Récupérer le modèle ML actif
+            modele_ml = self._get_active_model()
+            if not modele_ml:
+                raise ValueError("Aucun modèle ML actif trouvé")
+            
+            # Charger le modèle
+            model = self._load_model(modele_ml)
+            if not model:
+                raise ValueError(f"Impossible de charger le modèle {modele_ml.nom}")
+            
+            # Préparer les features
+            features_prepared = self._prepare_features(zone, features, modele_ml)
+            
+            # Calculer la prédiction
+            prediction_result = self._calculate_prediction(
+                model, features_prepared, horizon_jours, modele_ml
+            )
+            
+            # Créer l'objet Prediction
+            prediction = Prediction.objects.create(
+                zone=zone,
+                modele_ml=modele_ml,
+                horizon_jours=horizon_jours,
+                taux_erosion_pred_m_an=prediction_result['prediction'],
+                taux_erosion_min_m_an=prediction_result['min'],
+                taux_erosion_max_m_an=prediction_result['max'],
+                confiance_pourcentage=prediction_result['confidence'],
+                score_confiance=prediction_result['score'],
+                features_entree=features_prepared,
+                parametres_prediction={
+                    'horizon_jours': horizon_jours,
+                    'features_count': len(features_prepared),
+                    'model_version': modele_ml.version
+                },
+                commentaires=f"Prédiction générée par {modele_ml.nom} v{modele_ml.version}"
+            )
+            
+            # Mettre à jour les statistiques du modèle
+            modele_ml.nombre_predictions += 1
+            modele_ml.date_derniere_utilisation = timezone.now()
+            modele_ml.save()
+            
+            logger.info(f"Prédiction créée avec succès: {prediction.id}")
+            return prediction
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la prédiction: {e}")
+            raise
+    
+    def _get_active_model(self) -> Optional[ModeleML]:
+        """Récupère le modèle ML actif"""
+        try:
+            return ModeleML.objects.get(statut='actif')
+        except ModeleML.DoesNotExist:
+            logger.warning("Aucun modèle ML actif trouvé")
+            return None
+    
+    def _load_model(self, modele_ml: ModeleML):
+        """Charge le modèle depuis le fichier"""
+        try:
+            model_path = self.models_dir / modele_ml.chemin_fichier
+            if not model_path.exists():
+                logger.error(f"Fichier modèle non trouvé: {model_path}")
+                return None
+            
+            model = joblib.load(model_path)
+            logger.info(f"Modèle {modele_ml.nom} chargé avec succès")
+            return model
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement du modèle: {e}")
+            return None
+    
+    def _prepare_features(self, zone: Zone, features: Dict, modele_ml: ModeleML) -> Dict:
+        """Prépare les features pour la prédiction"""
+        logger.info(f"Préparation des features pour la zone {zone.nom}")
+        
+        # Features de base de la zone
+        prepared_features = {
+            'superficie_km2': zone.superficie_km2,
+            'niveau_risque_numerique': self._encode_risk_level(zone.niveau_risque),
+        }
+        
+        # Features des capteurs Arduino (dernières mesures)
+        capteurs_features = self._get_capteur_features(zone)
+        prepared_features.update(capteurs_features)
+        
+        # Features historiques d'érosion
+        historique_features = self._get_historique_features(zone)
+        prepared_features.update(historique_features)
+        
+        # Features environnementales récentes
+        env_features = self._get_environmental_features(zone)
+        prepared_features.update(env_features)
+        
+        # Features supplémentaires fournies par l'utilisateur
+        if features:
+            prepared_features.update(features)
+        
+        # Filtrer selon les features utilisées par le modèle
+        if modele_ml.features_utilisees:
+            filtered_features = {
+                key: value for key, value in prepared_features.items()
+                if key in modele_ml.features_utilisees
+            }
+            prepared_features = filtered_features
+        
+        logger.info(f"Features préparées: {list(prepared_features.keys())}")
+        return prepared_features
+    
+    def _encode_risk_level(self, niveau_risque: str) -> float:
+        """Encode le niveau de risque en valeur numérique"""
+        mapping = {
+            'faible': 1.0,
+            'modere': 2.0,
+            'eleve': 3.0,
+            'critique': 4.0
+        }
+        return mapping.get(niveau_risque, 1.0)
+    
+    def _get_capteur_features(self, zone: Zone) -> Dict:
+        """Récupère les features des capteurs Arduino"""
+        features = {}
+        
+        # Récupérer les dernières mesures des capteurs Arduino
+        capteurs = CapteurArduino.objects.filter(zone=zone, etat='actif')
+        
+        for capteur in capteurs:
+            derniere_mesure = MesureArduino.objects.filter(
+                capteur=capteur
+            ).order_by('-timestamp').first()
+            
+            if derniere_mesure:
+                # Features basées sur le type de capteur
+                if capteur.type == 'temperature':
+                    features['temperature_actuelle'] = derniere_mesure.temperature
+                elif capteur.type == 'humidite':
+                    features['humidite_actuelle'] = derniere_mesure.humidite
+                elif capteur.type == 'pression':
+                    features['pression_actuelle'] = derniere_mesure.pression
+                elif capteur.type == 'ph':
+                    features['ph_actuel'] = derniere_mesure.ph
+                elif capteur.type == 'salinite':
+                    features['salinite_actuelle'] = derniere_mesure.salinite
+                
+                # Moyennes sur les 7 derniers jours
+                date_limite = timezone.now() - timedelta(days=7)
+                mesures_recentes = MesureArduino.objects.filter(
+                    capteur=capteur,
+                    timestamp__gte=date_limite
+                )
+                
+                if mesures_recentes.exists():
+                    if capteur.type == 'temperature':
+                        features['temperature_moyenne_7j'] = mesures_recentes.aggregate(
+                            avg=Avg('temperature')
+                        )['avg']
+                    elif capteur.type == 'humidite':
+                        features['humidite_moyenne_7j'] = mesures_recentes.aggregate(
+                            avg=Avg('humidite')
+                        )['avg']
+        
+        return features
+    
+    def _get_historique_features(self, zone: Zone) -> Dict:
+        """Récupère les features de l'historique d'érosion"""
+        features = {}
+        
+        # Dernière mesure d'érosion
+        derniere_erosion = HistoriqueErosion.objects.filter(
+            zone=zone
+        ).order_by('-date_mesure').first()
+        
+        if derniere_erosion:
+            features['derniere_erosion_m_an'] = derniere_erosion.taux_erosion_m_an
+            features['precision_derniere_mesure'] = derniere_erosion.precision_m
+        
+        # Moyenne sur les 12 derniers mois
+        date_limite = timezone.now() - timedelta(days=365)
+        historique_recent = HistoriqueErosion.objects.filter(
+            zone=zone,
+            date_mesure__gte=date_limite
+        )
+        
+        if historique_recent.exists():
+            stats = historique_recent.aggregate(
+                avg=Avg('taux_erosion_m_an'),
+                min_val=Min('taux_erosion_m_an'),
+                max_val=Max('taux_erosion_m_an'),
+                count=Count('taux_erosion_m_an')
+            )
+            
+            features['erosion_moyenne_12m'] = stats['avg']
+            features['erosion_min_12m'] = stats['min_val']
+            features['erosion_max_12m'] = stats['max_val']
+            features['nombre_mesures_12m'] = stats['count']
+        
+        return features
+    
+    def _get_environmental_features(self, zone: Zone) -> Dict:
+        """Récupère les features environnementales"""
+        features = {}
+        
+        # Données environnementales récentes (dernières 30 jours)
+        date_limite = timezone.now() - timedelta(days=30)
+        donnees_env = DonneesEnvironnementales.objects.filter(
+            zone=zone,
+            periode_debut__gte=date_limite
+        ).order_by('-periode_debut').first()
+        
+        if donnees_env:
+            features.update({
+                'temperature_moyenne_env': donnees_env.temperature_moyenne,
+                'vitesse_vent_env': donnees_env.vitesse_vent,
+                'precipitation_totale_env': donnees_env.precipitation_totale,
+                'niveau_mer_moyen_env': donnees_env.niveau_mer_moyen,
+                'elevation_moyenne_env': donnees_env.elevation_moyenne,
+            })
+        
+        return features
+    
+    def _calculate_prediction(self, model, features: Dict, horizon_jours: int, modele_ml: ModeleML) -> Dict:
+        """Calcule la prédiction avec le modèle"""
+        try:
+            # Convertir les features en array numpy
+            feature_names = modele_ml.features_utilisees or list(features.keys())
+            feature_values = [features.get(name, 0.0) for name in feature_names]
+            X = np.array([feature_values]).reshape(1, -1)
+            
+            # Normaliser les features si nécessaire
+            if hasattr(model, 'scaler_') and model.scaler_:
+                X = model.scaler_.transform(X)
+            
+            # Prédiction principale
+            prediction = model.predict(X)[0]
+            
+            # Calcul de l'intervalle de confiance
+            if hasattr(model, 'predict_proba'):
+                # Pour les modèles qui supportent la prédiction de probabilité
+                proba = model.predict_proba(X)[0]
+                confidence = np.max(proba) * 100
+            else:
+                # Estimation basée sur la variance du modèle
+                if hasattr(model, 'estimators_'):
+                    # Random Forest: utiliser la variance des arbres
+                    predictions = [tree.predict(X)[0] for tree in model.estimators_]
+                    std_dev = np.std(predictions)
+                    confidence = max(0, min(100, 100 - std_dev * 10))
+                else:
+                    # Régression linéaire: estimation basique
+                    confidence = 75.0
+            
+            # Calculer l'intervalle de confiance (±2σ)
+            if hasattr(model, 'estimators_'):
+                # Random Forest: utiliser les prédictions des arbres
+                predictions = [tree.predict(X)[0] for tree in model.estimators_]
+                std_dev = np.std(predictions)
+                margin = 2 * std_dev
+            else:
+                # Estimation basique pour la régression linéaire
+                margin = abs(prediction) * 0.2  # 20% de marge
+            
+            min_pred = max(0, prediction - margin)
+            max_pred = prediction + margin
+            
+            return {
+                'prediction': float(prediction),
+                'min': float(min_pred),
+                'max': float(max_pred),
+                'confidence': float(confidence),
+                'score': float(confidence / 100)
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du calcul de prédiction: {e}")
+            # Retourner une prédiction par défaut en cas d'erreur
+            return {
+                'prediction': 0.1,  # 0.1 m/an par défaut
+                'min': 0.05,
+                'max': 0.15,
+                'confidence': 50.0,
+                'score': 0.5
+            }
+
+
+class MLTrainingService:
+    """Service d'entraînement des modèles ML"""
+    
+    def __init__(self):
+        self.models_dir = Path(settings.BASE_DIR) / 'ml_models'
+        self.models_dir.mkdir(exist_ok=True)
+    
+    def train_models(self) -> Dict:
+        """
+        Entraîne les modèles Random Forest et Régression Linéaire
+        
+        Returns:
+            Dictionnaire avec les résultats d'entraînement
+        """
+        logger.info("Début de l'entraînement des modèles ML")
+        
+        results = {
+            'random_forest': None,
+            'regression_lineaire': None,
+            'errors': []
+        }
+        
+        try:
+            # Préparer les données d'entraînement
+            X, y = self._prepare_training_data()
+            
+            if len(X) < 10:  # Minimum de données pour l'entraînement
+                raise ValueError("Pas assez de données pour l'entraînement (minimum 10 échantillons)")
+            
+            # Diviser les données
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+            
+            # Entraîner Random Forest
+            results['random_forest'] = self._train_random_forest(X_train, X_test, y_train, y_test)
+            
+            # Entraîner Régression Linéaire
+            results['regression_lineaire'] = self._train_linear_regression(X_train, X_test, y_train, y_test)
+            
+            # Sélectionner le meilleur modèle
+            best_model = self._select_best_model(results)
+            if best_model:
+                best_model.marquer_comme_actif()
+                logger.info(f"Modèle {best_model.nom} marqué comme actif")
+            
+            logger.info("Entraînement terminé avec succès")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'entraînement: {e}")
+            results['errors'].append(str(e))
+            return results
+    
+    def _prepare_training_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Prépare les données d'entraînement"""
+        logger.info("Préparation des données d'entraînement")
+        
+        training_data = []
+        target_values = []
+        
+        # Récupérer toutes les zones avec des données historiques
+        zones = Zone.objects.all()
+        
+        for zone in zones:
+            # Récupérer l'historique d'érosion de la zone
+            historique = HistoriqueErosion.objects.filter(zone=zone).order_by('-date_mesure')
+            
+            for mesure in historique:
+                # Préparer les features pour cette mesure
+                features = self._prepare_features_for_training(zone, mesure.date_mesure)
+                
+                if features:  # Si on a des features valides
+                    training_data.append(features)
+                    target_values.append(mesure.taux_erosion_m_an)
+        
+        if not training_data:
+            raise ValueError("Aucune donnée d'entraînement trouvée")
+        
+        X = np.array(training_data)
+        y = np.array(target_values)
+        
+        logger.info(f"Données d'entraînement préparées: {X.shape[0]} échantillons, {X.shape[1]} features")
+        return X, y
+    
+    def _prepare_features_for_training(self, zone: Zone, date_mesure) -> List[float]:
+        """Prépare les features pour une mesure d'entraînement"""
+        features = []
+        
+        # Features de base de la zone
+        features.extend([
+            zone.superficie_km2,
+            self._encode_risk_level(zone.niveau_risque),
+        ])
+        
+        # Features des capteurs (mesures autour de la date de mesure)
+        capteur_features = self._get_capteur_features_for_date(zone, date_mesure)
+        features.extend(capteur_features)
+        
+        # Features environnementales
+        env_features = self._get_environmental_features_for_date(zone, date_mesure)
+        features.extend(env_features)
+        
+        return features
+    
+    def _get_capteur_features_for_date(self, zone: Zone, date_mesure) -> List[float]:
+        """Récupère les features des capteurs pour une date donnée"""
+        features = []
+        
+        # Période de recherche (±7 jours autour de la date)
+        date_debut = date_mesure - timedelta(days=7)
+        date_fin = date_mesure + timedelta(days=7)
+        
+        # Capteurs Arduino
+        capteurs = CapteurArduino.objects.filter(zone=zone, etat='actif')
+        
+        for capteur in capteurs:
+            mesures = MesureArduino.objects.filter(
+                capteur=capteur,
+                timestamp__range=[date_debut, date_fin]
+            )
+            
+            if mesures.exists():
+                if capteur.type == 'temperature':
+                    features.append(mesures.aggregate(avg=Avg('temperature'))['avg'] or 0.0)
+                elif capteur.type == 'humidite':
+                    features.append(mesures.aggregate(avg=Avg('humidite'))['avg'] or 0.0)
+                elif capteur.type == 'pression':
+                    features.append(mesures.aggregate(avg=Avg('pression'))['avg'] or 0.0)
+                elif capteur.type == 'ph':
+                    features.append(mesures.aggregate(avg=Avg('ph'))['avg'] or 0.0)
+                elif capteur.type == 'salinite':
+                    features.append(mesures.aggregate(avg=Avg('salinite'))['avg'] or 0.0)
+            else:
+                features.append(0.0)  # Valeur par défaut
+        
+        return features
+    
+    def _get_environmental_features_for_date(self, zone: Zone, date_mesure) -> List[float]:
+        """Récupère les features environnementales pour une date donnée"""
+        features = []
+        
+        # Données environnementales autour de la date
+        date_debut = date_mesure - timedelta(days=30)
+        date_fin = date_mesure + timedelta(days=30)
+        
+        donnees_env = DonneesEnvironnementales.objects.filter(
+            zone=zone,
+            periode_debut__range=[date_debut, date_fin]
+        ).first()
+        
+        if donnees_env:
+            features.extend([
+                donnees_env.temperature_moyenne or 0.0,
+                donnees_env.vitesse_vent or 0.0,
+                donnees_env.precipitation_totale or 0.0,
+                donnees_env.niveau_mer_moyen or 0.0,
+                donnees_env.elevation_moyenne or 0.0,
+            ])
+        else:
+            features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+        
+        return features
+    
+    def _encode_risk_level(self, niveau_risque: str) -> float:
+        """Encode le niveau de risque en valeur numérique"""
+        mapping = {
+            'faible': 1.0,
+            'modere': 2.0,
+            'eleve': 3.0,
+            'critique': 4.0
+        }
+        return mapping.get(niveau_risque, 1.0)
+    
+    def _train_random_forest(self, X_train, X_test, y_train, y_test) -> Dict:
+        """Entraîne un modèle Random Forest"""
+        logger.info("Entraînement du modèle Random Forest")
+        
+        try:
+            # Créer et entraîner le modèle
+            model = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=10,
+                random_state=42,
+                n_jobs=-1
+            )
+            model.fit(X_train, y_train)
+            
+            # Évaluer le modèle
+            y_pred = model.predict(X_test)
+            mse = mean_squared_error(y_test, y_pred)
+            r2 = r2_score(y_test, y_pred)
+            
+            # Sauvegarder le modèle
+            model_filename = f"random_forest_{timezone.now().strftime('%Y%m%d_%H%M%S')}.joblib"
+            model_path = self.models_dir / model_filename
+            joblib.dump(model, model_path)
+            
+            # Créer l'objet ModeleML
+            modele_ml = ModeleML.objects.create(
+                nom="Random Forest Erosion",
+                version=f"1.{timezone.now().strftime('%Y%m%d')}",
+                type_modele='random_forest',
+                statut='inactif',
+                chemin_fichier=model_filename,
+                precision_score=r2,
+                parametres_entrainement={
+                    'n_estimators': 100,
+                    'max_depth': 10,
+                    'mse': mse,
+                    'r2_score': r2,
+                    'train_samples': len(X_train),
+                    'test_samples': len(X_test)
+                },
+                features_utilisees=list(range(X_train.shape[1])),  # Indices des features
+                commentaires=f"Modèle Random Forest entraîné le {timezone.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            
+            logger.info(f"Random Forest entraîné - R²: {r2:.3f}, MSE: {mse:.3f}")
+            
+            return {
+                'model_id': modele_ml.id,
+                'model_name': modele_ml.nom,
+                'r2_score': r2,
+                'mse': mse,
+                'model_path': str(model_path)
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur entraînement Random Forest: {e}")
+            return {'error': str(e)}
+    
+    def _train_linear_regression(self, X_train, X_test, y_train, y_test) -> Dict:
+        """Entraîne un modèle de Régression Linéaire"""
+        logger.info("Entraînement du modèle Régression Linéaire")
+        
+        try:
+            # Normaliser les features
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+            
+            # Créer et entraîner le modèle
+            model = LinearRegression()
+            model.fit(X_train_scaled, y_train)
+            
+            # Ajouter le scaler au modèle pour la prédiction
+            model.scaler_ = scaler
+            
+            # Évaluer le modèle
+            y_pred = model.predict(X_test_scaled)
+            mse = mean_squared_error(y_test, y_pred)
+            r2 = r2_score(y_test, y_pred)
+            
+            # Sauvegarder le modèle
+            model_filename = f"linear_regression_{timezone.now().strftime('%Y%m%d_%H%M%S')}.joblib"
+            model_path = self.models_dir / model_filename
+            joblib.dump(model, model_path)
+            
+            # Créer l'objet ModeleML
+            modele_ml = ModeleML.objects.create(
+                nom="Régression Linéaire Erosion",
+                version=f"1.{timezone.now().strftime('%Y%m%d')}",
+                type_modele='regression_lineaire',
+                statut='inactif',
+                chemin_fichier=model_filename,
+                precision_score=r2,
+                parametres_entrainement={
+                    'mse': mse,
+                    'r2_score': r2,
+                    'train_samples': len(X_train),
+                    'test_samples': len(X_test),
+                    'features_scaled': True
+                },
+                features_utilisees=list(range(X_train.shape[1])),  # Indices des features
+                commentaires=f"Modèle Régression Linéaire entraîné le {timezone.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            
+            logger.info(f"Régression Linéaire entraînée - R²: {r2:.3f}, MSE: {mse:.3f}")
+            
+            return {
+                'model_id': modele_ml.id,
+                'model_name': modele_ml.nom,
+                'r2_score': r2,
+                'mse': mse,
+                'model_path': str(model_path)
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur entraînement Régression Linéaire: {e}")
+            return {'error': str(e)}
+    
+    def _select_best_model(self, results: Dict) -> Optional[ModeleML]:
+        """Sélectionne le meilleur modèle basé sur le R² score"""
+        best_model = None
+        best_score = -float('inf')
+        
+        for model_type, result in results.items():
+            if result and 'r2_score' in result and not result.get('error'):
+                if result['r2_score'] > best_score:
+                    best_score = result['r2_score']
+                    best_model = ModeleML.objects.get(id=result['model_id'])
+        
+        return best_model

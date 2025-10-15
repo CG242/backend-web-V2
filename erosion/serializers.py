@@ -2,7 +2,7 @@ from rest_framework import serializers
 # from rest_framework_gis.serializers import GeoFeatureModelSerializer  # Désactivé temporairement
 from .models import (
     Utilisateur, Zone, HistoriqueErosion, Capteur, Mesure,
-    Prediction, TendanceLongTerme, Alerte, EvenementClimatique, JournalAction,
+    Prediction, ModeleML, TendanceLongTerme, Alerte, EvenementClimatique, JournalAction,
     CleAPI, DonneesCartographiques, DonneesEnvironnementales, 
     AnalyseErosion, LogAPICall,
     CapteurArduino, MesureArduino, DonneesManquantes, LogCapteurArduino,
@@ -95,17 +95,92 @@ class MesureSerializer(serializers.ModelSerializer):
 
 
 class PredictionSerializer(serializers.ModelSerializer):
-    """Serializer pour le modèle Prediction"""
+    """Serializer pour le modèle Prediction (ancien modèle - à supprimer)"""
     zone_nom = serializers.CharField(source='zone.nom', read_only=True)
     
     class Meta:
         model = Prediction
         fields = [
             'id', 'zone', 'zone_nom', 'date_prediction', 'horizon_jours',
-            'taux_erosion_pred_m_an', 'confiance_pourcentage', 'modele_utilise',
-            'parametres_modele', 'commentaires'
+            'taux_erosion_pred_m_an', 'confiance_pourcentage', 'modele_ml',
+            'parametres_prediction', 'commentaires'
         ]
         read_only_fields = ['id']
+
+
+class ModeleMLSerializer(serializers.ModelSerializer):
+    """Serializer pour le modèle ModeleML"""
+    nombre_predictions = serializers.IntegerField(read_only=True)
+    date_derniere_utilisation = serializers.DateTimeField(read_only=True)
+    
+    class Meta:
+        model = ModeleML
+        fields = [
+            'id', 'nom', 'version', 'type_modele', 'statut', 'chemin_fichier',
+            'precision_score', 'parametres_entrainement', 'features_utilisees',
+            'date_creation', 'date_derniere_utilisation', 'nombre_predictions',
+            'commentaires'
+        ]
+        read_only_fields = ['id', 'date_creation', 'date_derniere_utilisation', 'nombre_predictions']
+
+
+class PredictionMLSerializer(serializers.ModelSerializer):
+    """Serializer pour le nouveau modèle Prediction avec ML"""
+    zone_nom = serializers.CharField(source='zone.nom', read_only=True)
+    modele_nom = serializers.CharField(source='modele_ml.nom', read_only=True)
+    modele_version = serializers.CharField(source='modele_ml.version', read_only=True)
+    modele_type = serializers.CharField(source='modele_ml.type_modele', read_only=True)
+    intervalle_confiance = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = Prediction
+        fields = [
+            'id', 'zone', 'zone_nom', 'modele_ml', 'modele_nom', 'modele_version', 'modele_type',
+            'date_prediction', 'horizon_jours', 'taux_erosion_pred_m_an',
+            'taux_erosion_min_m_an', 'taux_erosion_max_m_an', 'intervalle_confiance',
+            'confiance_pourcentage', 'score_confiance', 'features_entree',
+            'parametres_prediction', 'commentaires'
+        ]
+        read_only_fields = ['id', 'date_prediction', 'intervalle_confiance']
+
+
+class PredictionRequestSerializer(serializers.Serializer):
+    """Serializer pour les requêtes de prédiction"""
+    zone_id = serializers.IntegerField(help_text="ID de la zone pour laquelle faire la prédiction")
+    horizon_jours = serializers.IntegerField(
+        default=30,
+        min_value=1,
+        max_value=365,
+        help_text="Horizon de prédiction en jours (1-365)"
+    )
+    features = serializers.DictField(
+        child=serializers.FloatField(),
+        help_text="Features supplémentaires pour la prédiction (optionnel)"
+    )
+    commentaires = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        help_text="Commentaires sur la prédiction"
+    )
+    
+    def validate_zone_id(self, value):
+        """Valide que la zone existe"""
+        try:
+            Zone.objects.get(id=value)
+        except Zone.DoesNotExist:
+            raise serializers.ValidationError("La zone spécifiée n'existe pas.")
+        return value
+    
+    def validate_features(self, value):
+        """Valide les features supplémentaires"""
+        # Vérifier que les features sont des valeurs numériques valides
+        for key, val in value.items():
+            if not isinstance(val, (int, float)):
+                raise serializers.ValidationError(f"La feature '{key}' doit être numérique.")
+            if not -1000 <= val <= 1000:  # Limite raisonnable pour éviter les valeurs aberrantes
+                raise serializers.ValidationError(f"La feature '{key}' doit être entre -1000 et 1000.")
+        return value
 
 
 class TendanceLongTermeSerializer(serializers.ModelSerializer):
@@ -122,20 +197,26 @@ class TendanceLongTermeSerializer(serializers.ModelSerializer):
 
 
 class AlerteSerializer(serializers.ModelSerializer):
-    """Serializer pour le modèle Alerte"""
-    zone_nom = serializers.CharField(source='zone.nom', read_only=True)
-    utilisateur_creation_nom = serializers.CharField(source='utilisateur_creation.get_full_name', read_only=True)
-    utilisateur_resolution_nom = serializers.CharField(source='utilisateur_resolution.get_full_name', read_only=True)
+    """Serializer pour le modèle Alerte d'érosion côtière"""
     
     class Meta:
         model = Alerte
         fields = [
-            'id', 'zone', 'zone_nom', 'type', 'niveau', 'titre', 'description',
-            'date_creation', 'date_resolution', 'est_resolue',
-            'utilisateur_creation', 'utilisateur_creation_nom',
-            'utilisateur_resolution', 'utilisateur_resolution_nom'
+            'id',
+            'titre',
+            'description',
+            'niveau_urgence',
+            'latitude',
+            'longitude',
+            'zone',
+            'date_creation',
+            'date_mise_a_jour',
+            'statut',
+            'source',
+            'donnees_meteo',
+            'donnees_marines'
         ]
-        read_only_fields = ['id', 'date_creation']
+        read_only_fields = ['id', 'date_creation', 'date_mise_a_jour']
 
 
 class EvenementClimatiqueSerializer(serializers.ModelSerializer):
@@ -419,6 +500,7 @@ class CapteurArduinoSerializer(serializers.ModelSerializer):
     nombre_mesures_total = serializers.SerializerMethodField()
     nombre_mesures_24h = serializers.SerializerMethodField()
     mot_de_passe_wifi_masque = serializers.SerializerMethodField()
+    position = serializers.SerializerMethodField()
     
     class Meta:
         model = CapteurArduino
@@ -466,6 +548,15 @@ class CapteurArduinoSerializer(serializers.ModelSerializer):
         if obj.mot_de_passe_wifi:
             return "****" if len(obj.mot_de_passe_wifi) > 4 else "**"
         return ""
+    
+    def get_position(self, obj):
+        """Retourne la position sous forme de dictionnaire"""
+        if obj.position:
+            return {
+                'latitude': obj.position.y,
+                'longitude': obj.position.x
+            }
+        return None
 
 
 class CapteurArduinoDocSerializer(serializers.ModelSerializer):
@@ -680,59 +771,108 @@ class EvenementExterneSerializer(serializers.ModelSerializer):
     zone_nom = serializers.CharField(source='zone.nom', read_only=True)
     est_recent = serializers.ReadOnlyField()
     niveau_risque = serializers.ReadOnlyField()
-    evenements_lies_count = serializers.SerializerMethodField()
     
     class Meta:
         model = EvenementExterne
         fields = [
-            'id', 'type_evenement', 'intensite', 'intensite_categorie', 'description',
+            'id', 'type_evenement', 'intensite', 'duree',
             'zone', 'zone_nom', 'date_evenement', 'date_reception',
-            'source', 'source_id', 'metadata', 'duree_minutes', 'rayon_impact_km',
-            'is_simulation', 'is_valide', 'is_traite', 'evenements_lies',
+            'statut', 'source', 'id_source', 'donnees_meteo',
+            'latitude', 'longitude', 'zone_erosion', 'niveau_risque',
+            'is_simulation', 'is_valide', 'is_traite',
             'commentaires', 'date_creation', 'date_modification',
-            'est_recent', 'niveau_risque', 'evenements_lies_count'
+            'est_recent'
         ]
-        read_only_fields = ['id', 'date_reception', 'date_creation', 'date_modification', 'intensite_categorie']
-    
-    def get_evenements_lies_count(self, obj):
-        """Retourne le nombre d'événements liés"""
-        return obj.evenements_lies.count()
+        read_only_fields = ['id', 'date_reception', 'date_creation', 'date_modification', 'niveau_risque', 'zone_erosion']
 
 
 class EvenementExterneReceptionSerializer(serializers.Serializer):
-    """Serializer pour recevoir les événements externes via API"""
-    type_evenement = serializers.ChoiceField(choices=EvenementExterne.TYPE_CHOICES)
-    intensite = serializers.FloatField(
-        min_value=0, 
-        max_value=100,
-        help_text="Intensité de 0 à 100"
-    )
-    description = serializers.CharField(required=False, allow_blank=True)
-    zone_id = serializers.IntegerField(help_text="ID de la zone concernée")
-    date_evenement = serializers.DateTimeField(help_text="Date/heure de l'événement")
-    source = serializers.CharField(max_length=100, help_text="Source de l'événement")
-    source_id = serializers.CharField(required=False, allow_blank=True, help_text="ID unique dans la source")
+    """Serializer pour recevoir les événements externes via API selon le format de votre ami"""
     
-    # Données optionnelles
-    metadata = serializers.JSONField(required=False, default=dict)
-    duree_minutes = serializers.IntegerField(required=False, min_value=1)
-    rayon_impact_km = serializers.FloatField(required=False, min_value=0)
-    is_simulation = serializers.BooleanField(required=False, default=False)
+    # Champs obligatoires selon le format spécifié
+    type = serializers.CharField(max_length=50, help_text="Type d'événement climatique")
+    intensite = serializers.FloatField(help_text="Intensité de l'événement")
+    duree = serializers.CharField(max_length=20, help_text="Durée de l'événement")
+    date = serializers.DateTimeField(help_text="Date/heure ISO 8601")
+    statut = serializers.CharField(max_length=20, help_text="Statut de l'événement")
+    source = serializers.CharField(max_length=20, help_text="Source de l'événement")
+    id = serializers.IntegerField(help_text="ID unique de l'événement")
     
-    def validate_zone_id(self, value):
-        """Valide que la zone existe"""
-        try:
-            Zone.objects.get(id=value)
-        except Zone.DoesNotExist:
-            raise serializers.ValidationError("Zone introuvable")
-        return value
+    # Champs optionnels pour géolocalisation
+    latitude = serializers.FloatField(required=False, help_text="Latitude")
+    longitude = serializers.FloatField(required=False, help_text="Longitude")
+    zone_id = serializers.IntegerField(required=False, help_text="ID de la zone concernée")
     
-    def validate_type_evenement(self, value):
+    # Données météo supplémentaires
+    donnees_meteo = serializers.JSONField(required=False, default=dict, help_text="Données météo supplémentaires")
+    
+    def validate_type(self, value):
         """Valide le type d'événement"""
         types_valides = [choice[0] for choice in EvenementExterne.TYPE_CHOICES]
         if value not in types_valides:
             raise serializers.ValidationError(f"Type d'événement invalide. Types valides: {types_valides}")
         return value
+    
+    def validate_statut(self, value):
+        """Valide le statut"""
+        statuts_valides = [choice[0] for choice in EvenementExterne.STATUT_CHOICES]
+        if value not in statuts_valides:
+            raise serializers.ValidationError(f"Statut invalide. Statuts valides: {statuts_valides}")
+        return value
+    
+    def validate_source(self, value):
+        """Valide la source"""
+        sources_valides = [choice[0] for choice in EvenementExterne.SOURCE_CHOICES]
+        if value not in sources_valides:
+            raise serializers.ValidationError(f"Source invalide. Sources valides: {sources_valides}")
+        return value
+    
+    def validate_intensite(self, value):
+        """Valide l'intensité"""
+        if value < 0 or value > 1000:
+            raise serializers.ValidationError("Intensité invalide (0-1000)")
+        return value
+    
+    def validate_zone_id(self, value):
+        """Valide que la zone existe si fournie"""
+        if value is not None:
+            try:
+                Zone.objects.get(id=value)
+            except Zone.DoesNotExist:
+                raise serializers.ValidationError("Zone introuvable")
+        return value
+    
+    def create(self, validated_data):
+        """Crée un nouvel événement externe"""
+        # Extraire les champs optionnels
+        zone_id = validated_data.pop('zone_id', None)
+        latitude = validated_data.pop('latitude', None)
+        longitude = validated_data.pop('longitude', None)
+        donnees_meteo = validated_data.pop('donnees_meteo', {})
+        
+        # Mapper les champs selon le format de votre ami
+        evenement_data = {
+            'type_evenement': validated_data['type'],
+            'intensite': validated_data['intensite'],
+            'duree': validated_data['duree'],
+            'date_evenement': validated_data['date'],
+            'statut': validated_data['statut'],
+            'source': validated_data['source'],
+            'id_source': validated_data['id'],
+            'latitude': latitude,
+            'longitude': longitude,
+            'donnees_meteo': donnees_meteo,
+        }
+        
+        # Créer l'événement
+        evenement = EvenementExterne.objects.create(**evenement_data)
+        
+        # Associer la zone si fournie
+        if zone_id:
+            evenement.zone_id = zone_id
+            evenement.save()
+        
+        return evenement
 
 
 class FusionDonneesSerializer(serializers.ModelSerializer):
